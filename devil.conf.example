@@ -1,0 +1,15 @@
+# Example configuration of `devil`
+
+# Directory where daemons should be installed
+path: /home/exio4/devil/daemons/
+
+# Number of seconds between checks
+# this should be improved, with a decent way to actually check stuff changed
+wakeup: 5
+
+# list of daemons to enable
+enabled:
+   - name: test_daemon
+#  - wakeup: 10
+# you can also override global settings per-daemon!
+
