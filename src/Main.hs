@@ -28,7 +28,7 @@ main = go =<< execParser params where
             loadConfig configFile >>= \case
                 Left err -> do
                     putStrLn ("Error loading config")
-                    putStrLn ("\t" ++ err)
+                    putStrLn ("\t" ++ show err)
                 Right cfg -> do
                     runDaemons cfg
 

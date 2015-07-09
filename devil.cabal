@@ -32,6 +32,7 @@ executable devil
                       ,directory == 1.2.2.1
                       ,filepath  == 1.4.0.0
                       ,cond == 0.4.1.1
+                      ,containers == 0.5.5.1
   hs-source-dirs:      src
   ghc-options:        -threaded
   default-language:    Haskell2010

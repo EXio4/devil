@@ -1,11 +1,13 @@
 -- example "daemon" (that does nothing)
 
-function cond()
-    print("[lua_example] inside-condition")
-    return true
-end
+throw_exception("wot")
 
-function action()
-    print("[lua_example] inside-event")
-    return
-end
+daemon.register(daemon.dummy, {
+    condition = function ()
+        print("condition")
+        return true
+    end,
+    action = function ()
+        print("event")
+    end
+})

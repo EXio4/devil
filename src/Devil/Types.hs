@@ -1,12 +1,20 @@
 module Devil.Types where
 
+import Data.Map (Map)
+import Data.Aeson
+import Data.Text (Text)
+
 data Config = Config {
-     cfg_daemonsPath  :: FilePath
-    ,cfg_daemons      :: [Daemon]
-    ,cfg_wakeupDelay  :: Int
+     cfg_devilPath   :: FilePath
+    ,cfg_daemons     :: [DaemonGlobal]
+    ,cfg_config      :: Map Text Value
 } deriving (Show,Eq)
 
-data Daemon = Daemon {
-      daemon_name    :: String
-     ,daemon_wakeup  :: Maybe Int
+data DaemonGlobal = DaemonGlobal {
+      daemon_name  :: Text
+     ,daemon_config  :: Map Text Value
+} deriving (Show,Eq)
+
+data DaemonLocal = DaemonLocal {
+    daemon_entryPoint :: String
 } deriving (Show,Eq)

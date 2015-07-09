@@ -5,19 +5,26 @@ import Devil.Types
 import Data.Yaml
 import Control.Applicative
 import Control.Monad
+import qualified Data.Map.Strict as M
+
 
 instance FromJSON Config where
     parseJSON (Object v) =
         Config <$> v .: "path"
                <*> v .: "enabled"
-               <*> v .: "wakeup"
+               <*> fmap (maybe M.empty id) (v .:? "config")
     parseJSON _ = mzero
 
-instance FromJSON Daemon where
+instance FromJSON DaemonGlobal where
     parseJSON (Object v) =
-        Daemon <$> v .:  "name"
-               <*> v .:? "wakeup"
+        DaemonGlobal <$> v .: "name"
+                     <*> fmap (maybe M.empty id) (v .:? "config")
     parseJSON _ = mzero
 
-loadConfig :: FilePath -> IO (Either String Config)
-loadConfig = fmap (either (Left . show) Right) . decodeFileEither
+instance FromJSON DaemonLocal where
+    parseJSON (Object v) =
+        DaemonLocal <$> v .: "entry_point"
+    parseJSON _ = mzero
+
+loadConfig :: FilePath -> IO (Either ParseException Config)
+loadConfig = decodeFileEither
