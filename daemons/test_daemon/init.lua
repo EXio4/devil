@@ -1,8 +1,6 @@
 -- example "daemon" (that does nothing)
 
-throw_exception("wot")
-
-daemon.register(daemon.dummy, {
+daemon.register(daemon.busy_wait, {
     condition = function ()
         print("condition")
         return true

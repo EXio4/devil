@@ -1,12 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Devil.Config (loadConfig) where
 
-import Devil.Types
-import Data.Yaml
-import Control.Applicative
-import Control.Monad
-import qualified Data.Map.Strict as M
-
+import           Control.Applicative
+import           Control.Monad
+import qualified Data.Map.Strict     as M
+import           Data.Yaml
+import           Devil.Types
 
 instance FromJSON Config where
     parseJSON (Object v) =

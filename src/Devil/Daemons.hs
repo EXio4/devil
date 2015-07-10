@@ -1,38 +1,41 @@
-{-# LANGUAGE DeriveDataTypeable, OverloadedStrings, MultiWayIf #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE MultiWayIf         #-}
+{-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Devil.Daemons (runDaemons) where
 
-import           Devil.Types
-import           Devil.Config
-import qualified Devil.Log as Log
-import           System.FilePath
 import           Control.Applicative
-import           Control.Monad
-import           Control.Exception
 import           Control.Concurrent
 import           Control.Conditional
-import           Data.IORef
-import           Data.Function
-import           Data.Monoid
-import           Data.Typeable
+import           Control.Exception
+import           Control.Monad
 import           Data.Aeson
-import qualified Data.Yaml as YAML
-import           Data.Yaml (ParseException)
-import           Data.Text  (Text)
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
-import           Data.Map   (Map)
-import qualified Data.Map.Strict as M
-import           Foreign.C.Types
+import           Data.ByteString       (ByteString)
 import qualified Data.ByteString.Char8 as BS
-import           Data.ByteString (ByteString)
-import qualified Scripting.Lua as Lua
-import           Scripting.Lua (LuaState,StackValue(..))
+import           Data.Function
+import           Data.IORef
+import           Data.Map              (Map)
+import qualified Data.Map.Strict       as M
+import           Data.Monoid
+import           Data.Text             (Text)
+import qualified Data.Text             as T
+import qualified Data.Text.Encoding    as T
+import           Data.Typeable
+import           Data.Yaml             (ParseException)
+import qualified Data.Yaml             as YAML
+import           Devil.Config
+import qualified Devil.Log             as Log
+import           Devil.Types
+import           Foreign.C.Types
+import           Scripting.Lua         (LuaState, StackValue (..))
+import qualified Scripting.Lua         as Lua
+import           System.FilePath
 
 type Environment = Map Text Value
 
-data DaemonException = LuaError !Text !Text
-                     | LuaReRegister !Text
-                     | ConfigError !ParseException
+data DaemonException = LuaError           !Text     !Text
+                     | LuaReRegister      !Text
+                     | ConfigError        !ParseException
                      | UnregisteredDaemon !Text
     deriving (Show,Typeable)
 instance Exception DaemonException
@@ -43,9 +46,6 @@ instance StackValue Text where
     valuetype _ = valuetype (undefined :: ByteString)
 
 (typDummy,typBusyWait) = (0,1)
-
-entryPoint = "init.lua"
-entryPoint :: FilePath
 
 runDaemons :: Config -> IO ()
 runDaemons (Config {
@@ -61,7 +61,7 @@ runDaemons (Config {
 
 
 wrap :: StackValue a => (Text -> IO (Maybe a)) -> LuaState -> IO CInt
-wrap f l = 
+wrap f l =
     ifM (notM (Lua.isstring l 1)) (
         return (-1)
     ) $ do
@@ -88,15 +88,15 @@ runDaemon path daemonName environment = do
                             YAML.decodeFileEither (daemon_path </> "daemon.conf") >>=
                             either (throw .  ConfigError) return
             Lua.openlibs l
-            Lua.registerrawhsfunction l "_internal_get_integer" (wrap $ getInteger environment)
-            Lua.registerrawhsfunction l "_internal_get_string"  (wrap $ getString  environment)
+            Lua.registerrawhsfunction l "_internal_get_integer"     (wrap $ getInteger environment)
+            Lua.registerrawhsfunction l "_internal_get_string"      (wrap $ getString  environment)
             Lua.registerrawhsfunction l "_internal_throw_exception" (throwLuaException daemonName)
             Lua.registerrawhsfunction l "_internal_register_daemon" $
                     fmap fromIntegral . registerDaemon ref daemonName environment
             Lua.loadfile l (path </> "common" </> "api.lua")
-            Log.info (daemonName <> " :: Loading api")
+            Log.info (daemonName <> " :: Loading (common) api")
             pcall' l daemonName 0 0 0
-            Log.info (daemonName <> " :: Loading entry point")
+            Log.info (daemonName <> " :: Loading daemon")
             Lua.loadfile l (daemon_path </> entryPoint)
             pcall' l daemonName 0 0 0
             fn <- maybe (throw (UnregisteredDaemon daemonName)) return =<< readIORef ref
@@ -129,28 +129,31 @@ getString m txt = return x
 registerDaemon :: IORef (Maybe Daemon) -> Text -> Environment-> LuaState -> IO Int
 registerDaemon ref daemonName env l = do
     -- we make sure that this is the `first` valid call to register_daemon
-    maybe (throw (LuaReRegister daemonName)) return =<< readIORef ref
+    maybe (return ()) (const $ (throw (LuaReRegister daemonName))) =<< readIORef ref
 
     {- we do no error checking, this function should only be called internally
        after all invariants were "checked", this leads to some kind of fragile code
-       but the other way I could think of was to just do the checking here (which leads to boilerplateish)
+       but the other way I could think of was to just do the checking here
+       (which would, indeed, be nicer, I have to learn to use the lua c api first though)
     -}
-    typ <- Lua.tointeger l 1
-    if | typ == typDummy -> do
-            writeIORef ref (Just DaemonDummy)
-            return 0
-       | typ == typBusyWait -> do
-           x <- getInteger env "wakeup"
-           Lua.pop l 1
-           cond <- Lua.ref l Lua.registryindex
-           Lua.pop l 1
-           action <- Lua.ref l Lua.registryindex
-           case x of
-                Just wakeupDelay -> do
-                    writeIORef ref (Just (DaemonBusyWait (BusyWait wakeupDelay cond action)))
+    top <- Lua.gettop l
+    (typ :: Maybe Int) <- Lua.peek l 1
+    case typ of
+      Nothing  -> return (-1)
+      Just typ ->
+            if | typ == typDummy -> do
+                    writeIORef ref (Just DaemonDummy)
                     return 0
-                Nothing          -> return (-1)
-       | otherwise -> throw (LuaError daemonName "[internal] given `register_daemon` invalid type of daemon")
+               | typ == typBusyWait -> do
+                   x <- getInteger env "wakeup"
+                   action <- Lua.ref l Lua.registryindex
+                   cond   <- Lua.ref l Lua.registryindex
+                   case x of
+                        Just wakeupDelay -> do
+                            writeIORef ref (Just (DaemonBusyWait (BusyWait wakeupDelay cond action)))
+                            return 0
+                        Nothing          -> return (-1)
+               | otherwise -> throw (LuaError daemonName "[internal] given `register_daemon` invalid type of daemon")
 
 type LuaRefFunction = Int
 
@@ -167,7 +170,6 @@ data BusyWait
 sleepS :: Int -> IO ()
 sleepS n = mapM_ (const (threadDelay (10^6))) [1..n]
 
-
 busyWait :: LuaState -> Text -> BusyWait -> IO ()
 busyWait l daemonName (BusyWait wakeupDelay cond action) =
             (forever . (>> sleepS wakeupDelay)) $ do
@@ -180,6 +182,6 @@ busyWait l daemonName (BusyWait wakeupDelay cond action) =
 
 
 pcall' :: LuaState -> Text -> Int -> Int -> Int -> IO ()
-pcall' l daemonName x y z = do
+pcall' l daemonName x y z =
         whenM ((/=0) <$> Lua.pcall l x y z) luaError
     where luaError = throw . LuaError daemonName =<< fmap T.decodeUtf8 (Lua.tostring l (-1))

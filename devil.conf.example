@@ -1,9 +1,9 @@
 # Example configuration of `devil`
 
-# Main directory 
+# Main directory
 path: /home/exio4/devil/
 
-# default configuration for daemons
+# default configuration for daemons (you can leave this out, if you want)
 config:
     wakeup: 10
 
@@ -13,3 +13,4 @@ enabled:
      config:
        wakeup: 10
        # you can override global settings in a per-daemon manner
+       # you can also add extra options (which may be needed for the daemon)

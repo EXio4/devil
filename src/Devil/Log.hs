@@ -1,10 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Devil.Log (info) where
 
-import qualified Data.Text.IO as T.IO
-import qualified Data.Text    as T
-import           Data.Text       (Text)
 import           Data.Monoid
+import           Data.Text    (Text)
+import qualified Data.Text.IO as T.IO
 
 info :: Text -> IO ()
 info str = do

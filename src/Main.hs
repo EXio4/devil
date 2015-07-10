@@ -1,9 +1,9 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase, NamedFieldPuns #-}
 module Main (main) where
 
-import Options.Applicative
-import Devil.Config
-import Devil.Daemons
+import           Devil.Config
+import           Devil.Daemons
+import           Options.Applicative
 
 data Params = Params {
      configFile :: String
@@ -18,17 +18,17 @@ params'
             <> metavar "CONFIG"
             <> help "Config file")
 
+params :: ParserInfo Params
 params = info (helper <*> params')
             (  progDesc "Small (and silly!) `daemon` manager"
             )
 
 main :: IO ()
 main = go =<< execParser params where
-        go (Params configFile) =
+        go (Params{configFile}) =
             loadConfig configFile >>= \case
                 Left err -> do
-                    putStrLn ("Error loading config")
+                    putStrLn "Error loading config"
                     putStrLn ("\t" ++ show err)
-                Right cfg -> do
+                Right cfg ->
                     runDaemons cfg
-
