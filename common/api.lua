@@ -7,7 +7,9 @@ daemon.busy_wait = 1
 config.get_integer = _internal_get_integer
 config.get_text    = _internal_get_text
 
-throw_exception = _internal_throw_exception
+throw_exception = function (err)
+    return error("'LUA_EXC_" .. err)
+end
 
 print = _internal_log_info
 

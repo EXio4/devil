@@ -36,6 +36,7 @@ import qualified Control.Concurrent.Chan
 type Environment = Map Text Value
 
 data DaemonException = LuaError           !Text
+                     | LuaException       !Text
                      | LuaReRegister
                      | ConfigError        !ParseException
                      | UnregisteredDaemon
@@ -83,6 +84,8 @@ runDaemon path daemonName environment = do
             [Handler (\case
                 LuaError      why      -> Log.error_d daemonName
                           ("Lua Error: " <> why)
+                LuaException  why      -> Log.error_d daemonName
+                          ("Lua exception: " <> why)
                 LuaReRegister          -> Log.error_d daemonName
                           "Daemon re-registered itself"
                 ConfigError   parseExc -> Log.error_d daemonName
@@ -107,7 +110,6 @@ runDaemon path daemonName environment = do
             Lua.openlibs l
             Lua.registerrawhsfunction l "_internal_get_integer"     (wrap $ getInteger environment)
             Lua.registerrawhsfunction l "_internal_get_string"      (wrap $ getString  environment)
-            Lua.registerrawhsfunction l "_internal_throw_exception" throwLuaException
             Lua.registerrawhsfunction l "_internal_log_info"        (wrapLog $ Log.info_d daemonName)
             Lua.registerrawhsfunction l "_internal_register_daemon" $
                     fmap fromIntegral . registerDaemon ref daemonName environment
@@ -132,14 +134,6 @@ wrapLog f l = do
   f =<< (T.decodeUtf8 <$> Lua.tostring l 1)
   Lua.pop l 1
   return 0
-
-
-throwLuaException :: LuaState -> IO CInt
-throwLuaException l = do
-    x <- Lua.peek l 1
-    case x of
-         Nothing  -> return (-1)
-         Just str -> throw (LuaError ("[error] " <> str))
 
 getInteger :: Environment -> Text -> IO (Maybe Int)
 getInteger m txt = return x
@@ -213,4 +207,12 @@ busyWait l daemonName (BusyWait wakeupDelay cond action) =
 pcall' :: LuaState -> Text -> Int -> Int -> Int -> IO ()
 pcall' l daemonName x y z =
         whenM ((/=0) <$> Lua.pcall l x y z) luaError
-    where luaError = throw . LuaError =<< fmap T.decodeUtf8 (Lua.tostring l (-1))
+    where luaError = throw . f =<< fmap T.decodeUtf8 (Lua.tostring l (-1))
+          prefix = "'LUA_EXC_"
+          {- this string hackery is done because throwing an exceptiom from within a lua pcall
+             pretty much breaks the exception handler
+             (should check other ways to do this, maybe one that doesn't suck)
+          -}
+          f x = case fmap (T.drop (T.length prefix)) $ T.breakOn prefix x of
+            (x, "") -> LuaError x
+            (t, r)  -> LuaException (t <> r)

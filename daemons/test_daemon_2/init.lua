@@ -1,6 +1,7 @@
 -- example "daemon" (that does nothing, but crash)
 
 local i = 0
+
 daemon.register(daemon.busy_wait, {
     condition = function ()
         print("condition")
