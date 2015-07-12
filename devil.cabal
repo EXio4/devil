@@ -21,6 +21,7 @@ executable devil
                       ,Devil.Daemons
                       ,Devil.Types
                       ,Devil.Log
+                      ,Devil.LuaValue
   -- other-extensions:
   build-depends:       base >=4.7 && <4.8
                       ,hslua == 0.4.0

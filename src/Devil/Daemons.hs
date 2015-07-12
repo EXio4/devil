@@ -1,39 +1,43 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE MultiWayIf         #-}
-{-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE LambdaCase         #-}
+{-# LANGUAGE DeriveDataTypeable  #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE MultiWayIf          #-}
+{-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Devil.Daemons (runDaemons) where
 
 import           Control.Applicative
 import           Control.Concurrent
+import           Control.Concurrent.Chan
 import           Control.Conditional
 import           Control.Exception
 import           Control.Monad
 import           Data.Aeson
-import           Data.ByteString       (ByteString)
-import qualified Data.ByteString.Char8 as BS
-import           Data.Function
+import           Data.ByteString         (ByteString)
 import           Data.IORef
-import           Data.Map              (Map)
-import qualified Data.Map.Strict       as M
+import           Data.Map                (Map)
+import qualified Data.Map.Strict         as M
 import           Data.Monoid
-import           Data.Text             (Text)
-import qualified Data.Text             as T
-import qualified Data.Text.Encoding    as T
+import           Data.Text               (Text)
+import qualified Data.Text               as T
+import qualified Data.Text.Encoding      as T
 import           Data.Typeable
-import           Data.Yaml             (ParseException)
-import qualified Data.Yaml             as YAML
-import           Devil.Config
-import qualified Devil.Log             as Log
+import           Data.Yaml               (ParseException)
+import qualified Data.Yaml               as YAML
+import           Devil.Config            ()
+import qualified Devil.Log               as Log
+import           Devil.LuaValue          (LuaValue)
+import qualified Devil.LuaValue          as LuaValue
 import           Devil.Types
 import           Foreign.C.Types
-import           Scripting.Lua         (LuaState, StackValue (..))
-import qualified Scripting.Lua         as Lua
+import           Scripting.Lua           (LuaState, StackValue (..))
+import qualified Scripting.Lua           as Lua
 import           System.FilePath
-import qualified Control.Concurrent.Chan
 
 type Environment = Map Text Value
+type ChanMVar    = MVar (Map Text (Chan LuaValue))
+
+lua_totext :: LuaState -> Int -> IO Text
+lua_totext l n = fmap T.decodeUtf8 $ Lua.tostring l n
 
 data DaemonException = LuaError           !Text
                      | LuaException       !Text
@@ -43,12 +47,7 @@ data DaemonException = LuaError           !Text
     deriving (Show,Typeable)
 instance Exception DaemonException
 
-instance StackValue Text where
-    push l   = push l . T.encodeUtf8
-    peek l n = fmap (fmap T.decodeUtf8) $ peek l n
-    valuetype _ = valuetype (undefined :: ByteString)
-
-(typDummy,typBusyWait) = (0,1)
+(typDummy,typBusyWait,typLoop) = (0,1,2)
 
 runDaemons :: Config -> IO ()
 runDaemons (Config {
@@ -56,19 +55,66 @@ runDaemons (Config {
                ,cfg_daemons   = daemons
                ,cfg_config    = global_cfg
            })= do
+    chanMap <- newMVar M.empty
     Log.info "Starting daemons..."
     refs <- forM daemons $ \(DaemonGlobal name local_cfg) -> do
         Log.loadingData name
-        runDaemon dir name (local_cfg `M.union` global_cfg)
+        runDaemon dir name chanMap (local_cfg `M.union` global_cfg)
     forM_ refs readMVar -- waiting for threads
 
+luaWithChan :: ChanMVar -> Text -> Text -> (Chan LuaValue -> IO a) -> IO a
+luaWithChan mvar xid action cb = do
+    Log.debug_d "lua_chans" (action <> "@withChan (" <> xid <> ")")
+    x <- takeMVar mvar
+    v <- case M.lookup xid x of
+      Just chan -> do
+        putMVar mvar x
+        Log.debug_d "lua_chans" (action <> "@[" <> xid <> "] found, using it")
+        cb chan
+      Nothing -> do
+        Log.debug_d "lua_chans" (action <> "@[" <> xid <> "] not found, creating new one")
+        chan <- newChan
+        let mp = M.insert xid chan x
+        mp `seq` putMVar mvar mp
+        cb chan
+    Log.debug_d "lua_chans" (action <> "@ finished")
+    return v
+
+luaChanRead :: ChanMVar -> Text -> IO LuaValue
+luaChanRead mvar xid
+  = luaWithChan mvar xid "read" $ \chan ->
+            readChan chan
+
+luaChanSend :: ChanMVar -> Text -> LuaValue -> IO ()
+luaChanSend mvar xid value
+  = luaWithChan mvar xid "send" $ \chan ->
+            writeChan chan value
+
+luaChanRead'raw :: ChanMVar -> LuaState -> IO CInt
+luaChanRead'raw mvar l = do
+      xid <- lua_totext l 1
+      Lua.pop l 1
+      val <- luaChanRead mvar xid
+      LuaValue.push l val
+      return 1
+
+luaChanSend'raw :: ChanMVar -> LuaState -> IO CInt
+luaChanSend'raw mvar l = do
+      xid <- lua_totext l 1
+      val <- LuaValue.pop l 2
+      Lua.pop l 2
+      case val of
+        Nothing -> return (-1)
+        Just v -> do
+            luaChanSend mvar xid v
+            return 0
 
 wrap :: StackValue a => (Text -> IO (Maybe a)) -> LuaState -> IO CInt
 wrap f l =
     ifM (notM (Lua.isstring l 1)) (
         return (-1)
     ) $ do
-        str <- fmap T.decodeUtf8 $ Lua.tostring l 1
+        str <- lua_totext l 1
         Lua.pop l 1
         x <- f str
         case x of
@@ -76,8 +122,9 @@ wrap f l =
             Just v  -> Lua.push l v
         return 1
 
-runDaemon :: FilePath -> Text -> Environment -> IO (MVar ())
-runDaemon path daemonName environment = do
+
+runDaemon :: FilePath -> Text -> ChanMVar -> Environment -> IO (MVar ())
+runDaemon path daemonName chanMVar environment = do
     let daemon_path = path </> "daemons" </> T.unpack daemonName
     ret <- newEmptyMVar
     let handlers =
@@ -111,12 +158,15 @@ runDaemon path daemonName environment = do
             Lua.registerrawhsfunction l "_internal_get_integer"     (wrap $ getInteger environment)
             Lua.registerrawhsfunction l "_internal_get_string"      (wrap $ getString  environment)
             Lua.registerrawhsfunction l "_internal_log_info"        (wrapLog $ Log.info_d daemonName)
+            Lua.registerrawhsfunction l "_internal_read_chan"       (luaChanRead'raw chanMVar)
+            Lua.registerrawhsfunction l "_internal_send_chan"       (luaChanSend'raw chanMVar)
+            Lua.registerhsfunction    l "_internal_sleep"           sleepS
             Lua.registerrawhsfunction l "_internal_register_daemon" $
                     fmap fromIntegral . registerDaemon ref daemonName environment
             Lua.loadfile l (path </> "common" </> "api.lua")
-            Log.info (daemonName <> " :: Loading (common) api")
+            Log.info_d daemonName  "Loading (common) api"
             pcall' l daemonName 0 0 0
-            Log.info (daemonName <> " :: Loading daemon")
+            Log.info_d daemonName "Loading daemon"
             Lua.loadfile l (daemon_path </> entryPoint)
             pcall' l daemonName 0 0 0
             fn <- maybe (throw UnregisteredDaemon) return =<< readIORef ref
@@ -125,6 +175,7 @@ runDaemon path daemonName environment = do
                          Log.info "(dummy setup, used for checking initializing core stuff was possible)"
                          return ()
                     DaemonBusyWait cfg -> busyWait l daemonName cfg
+                    DaemonLoop loopR   -> loop l daemonName loopR
         )
     return ret
 
@@ -177,13 +228,24 @@ registerDaemon ref daemonName env l = do
                             return 0
                         Nothing          ->
                             return (-1)
+               | typ == typLoop -> do
+                  Lua.getfield l 2 "loop"
+                  loop <- Lua.ref l Lua.registryindex
+                  Lua.settop l 0
+                  writeIORef ref (Just (DaemonLoop (Loop loop)))
+                  return 0
                | otherwise -> throw (LuaError "[internal] given `register_daemon` invalid type of daemon")
 
 type LuaRefFunction = Int
 
 data Daemon
     = DaemonBusyWait !BusyWait
+    | DaemonLoop     !Loop
     | DaemonDummy
+
+data Loop
+    = Loop
+        !LuaRefFunction
 
 data BusyWait
     = BusyWait
@@ -193,6 +255,12 @@ data BusyWait
 
 sleepS :: Int -> IO ()
 sleepS n = mapM_ (const (threadDelay (10^6))) [1..n]
+
+loop :: LuaState -> Text -> Loop -> IO ()
+loop l daemonName (Loop loopR) =
+    forever $ do
+        Lua.rawgeti l Lua.registryindex loopR
+        pcall' l daemonName 0 0 0
 
 busyWait :: LuaState -> Text -> BusyWait -> IO ()
 busyWait l daemonName (BusyWait wakeupDelay cond action) =

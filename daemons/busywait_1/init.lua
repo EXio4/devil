@@ -1,11 +1,10 @@
--- example "daemon" (that does nothing)
+-- example "daemon" (that just loops)
 
 daemon.register(daemon.busy_wait, {
     condition = function ()
-        print("condition")
-        return true
+      return true
     end,
     action = function ()
-        print("event")
+    
     end
 })

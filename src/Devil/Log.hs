@@ -68,7 +68,7 @@ message scope lvl str = do
        writeChan chan
              ([C Red, S "(", C Magenta, S time1, C Yellow
               , S "[", C Magenta, S time2, C Yellow, S "]"
-              , C Red, S "|", C Magenta, S scope, C Red, S ") "
+              , C Red, S "|", C Magenta, S scope, C Red, S ") ", S "\t"
               , lC lvl, S (T.pack (show lvl)), C White, S "\t"] <> str)
     -- should ignore this for now, we're doing proper exception handling n stuff
     when (lvl == ERROR) $ return ()

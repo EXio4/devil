@@ -9,11 +9,12 @@ config:
 
 # list of daemons to enable
 enabled:
-   - name: test_daemon_2
+   - name: busywait_1
      config:
-       wakeup: 4
-   - name: test_daemon
+       wakeup: 5
+   - name: busywait_2_crash
      config:
-       wakeup: 10
-       # you can override global settings in a per-daemon manner
-       # you can also add extra options (which may be needed for the daemon)
+       wakeup: 3
+   - name: dummy_daemon
+   - name: loop_recv
+   - name: loop_send
