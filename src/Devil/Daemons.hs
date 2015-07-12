@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE MultiWayIf         #-}
 {-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE LambdaCase         #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Devil.Daemons (runDaemons) where
 
@@ -30,13 +31,14 @@ import           Foreign.C.Types
 import           Scripting.Lua         (LuaState, StackValue (..))
 import qualified Scripting.Lua         as Lua
 import           System.FilePath
+import qualified Control.Concurrent.Chan
 
 type Environment = Map Text Value
 
-data DaemonException = LuaError           !Text     !Text
-                     | LuaReRegister      !Text
+data DaemonException = LuaError           !Text
+                     | LuaReRegister
                      | ConfigError        !ParseException
-                     | UnregisteredDaemon !Text
+                     | UnregisteredDaemon
     deriving (Show,Typeable)
 instance Exception DaemonException
 
@@ -55,7 +57,7 @@ runDaemons (Config {
            })= do
     Log.info "Starting daemons..."
     refs <- forM daemons $ \(DaemonGlobal name local_cfg) -> do
-        Log.info (":: " <> name)
+        Log.loadingData name
         runDaemon dir name (local_cfg `M.union` global_cfg)
     forM_ refs readMVar -- waiting for threads
 
@@ -77,7 +79,22 @@ runDaemon :: FilePath -> Text -> Environment -> IO (MVar ())
 runDaemon path daemonName environment = do
     let daemon_path = path </> "daemons" </> T.unpack daemonName
     ret <- newEmptyMVar
-    forkIO $ bracket
+    let handlers =
+            [Handler (\case
+                LuaError      why      -> Log.error_d daemonName
+                          ("Lua Error: " <> why)
+                LuaReRegister          -> Log.error_d daemonName
+                          "Daemon re-registered itself"
+                ConfigError   parseExc -> Log.error_d daemonName
+                          ("Config Error" <> T.pack (show parseExc))
+                UnregisteredDaemon     -> Log.error_d daemonName
+                          ("Daemon didn't register into the system")
+            ),
+            Handler (\(e :: SomeException) ->
+                  Log.error_d daemonName ("UnknownException :: " <> T.pack (show e))
+            )]
+    forkIO . flip catches handlers $
+        bracket
         Lua.newstate
         (\l -> do
             Lua.close l
@@ -90,7 +107,8 @@ runDaemon path daemonName environment = do
             Lua.openlibs l
             Lua.registerrawhsfunction l "_internal_get_integer"     (wrap $ getInteger environment)
             Lua.registerrawhsfunction l "_internal_get_string"      (wrap $ getString  environment)
-            Lua.registerrawhsfunction l "_internal_throw_exception" (throwLuaException daemonName)
+            Lua.registerrawhsfunction l "_internal_throw_exception" throwLuaException
+            Lua.registerrawhsfunction l "_internal_log_info"        (wrapLog $ Log.info_d daemonName)
             Lua.registerrawhsfunction l "_internal_register_daemon" $
                     fmap fromIntegral . registerDaemon ref daemonName environment
             Lua.loadfile l (path </> "common" </> "api.lua")
@@ -99,7 +117,7 @@ runDaemon path daemonName environment = do
             Log.info (daemonName <> " :: Loading daemon")
             Lua.loadfile l (daemon_path </> entryPoint)
             pcall' l daemonName 0 0 0
-            fn <- maybe (throw (UnregisteredDaemon daemonName)) return =<< readIORef ref
+            fn <- maybe (throw UnregisteredDaemon) return =<< readIORef ref
             case fn of
                     DaemonDummy -> do
                          Log.info "(dummy setup, used for checking initializing core stuff was possible)"
@@ -108,12 +126,20 @@ runDaemon path daemonName environment = do
         )
     return ret
 
-throwLuaException :: Text -> LuaState -> IO CInt
-throwLuaException daemonName l = do
+
+wrapLog :: (Text -> IO ()) -> LuaState -> IO CInt
+wrapLog f l = do
+  f =<< (T.decodeUtf8 <$> Lua.tostring l 1)
+  Lua.pop l 1
+  return 0
+
+
+throwLuaException :: LuaState -> IO CInt
+throwLuaException l = do
     x <- Lua.peek l 1
     case x of
          Nothing  -> return (-1)
-         Just str -> throw (LuaError daemonName ("[error] " <> str))
+         Just str -> throw (LuaError ("[error] " <> str))
 
 getInteger :: Environment -> Text -> IO (Maybe Int)
 getInteger m txt = return x
@@ -129,31 +155,35 @@ getString m txt = return x
 registerDaemon :: IORef (Maybe Daemon) -> Text -> Environment-> LuaState -> IO Int
 registerDaemon ref daemonName env l = do
     -- we make sure that this is the `first` valid call to register_daemon
-    maybe (return ()) (const $ (throw (LuaReRegister daemonName))) =<< readIORef ref
+    maybe (return ()) (const $ throw LuaReRegister) =<< readIORef ref
 
     {- we do no error checking, this function should only be called internally
        after all invariants were "checked", this leads to some kind of fragile code
        but the other way I could think of was to just do the checking here
        (which would, indeed, be nicer, I have to learn to use the lua c api first though)
     -}
-    top <- Lua.gettop l
     (typ :: Maybe Int) <- Lua.peek l 1
     case typ of
       Nothing  -> return (-1)
       Just typ ->
             if | typ == typDummy -> do
                     writeIORef ref (Just DaemonDummy)
+                    Lua.settop l 0
                     return 0
                | typ == typBusyWait -> do
                    x <- getInteger env "wakeup"
-                   action <- Lua.ref l Lua.registryindex
+                   Lua.getfield l 2 "condition"
                    cond   <- Lua.ref l Lua.registryindex
+                   Lua.getfield l 2 "action"
+                   action <- Lua.ref l Lua.registryindex
+                   Lua.settop l 0
                    case x of
                         Just wakeupDelay -> do
                             writeIORef ref (Just (DaemonBusyWait (BusyWait wakeupDelay cond action)))
                             return 0
-                        Nothing          -> return (-1)
-               | otherwise -> throw (LuaError daemonName "[internal] given `register_daemon` invalid type of daemon")
+                        Nothing          ->
+                            return (-1)
+               | otherwise -> throw (LuaError "[internal] given `register_daemon` invalid type of daemon")
 
 type LuaRefFunction = Int
 
@@ -178,10 +208,9 @@ busyWait l daemonName (BusyWait wakeupDelay cond action) =
                 whenM (Lua.isboolean l (-1) <&&> Lua.toboolean l (-1)) $ do
                     Lua.rawgeti l Lua.registryindex action
                     pcall' l daemonName 0 0 0
-                Lua.pop l (-1)
-
+                Lua.pop l 1
 
 pcall' :: LuaState -> Text -> Int -> Int -> Int -> IO ()
 pcall' l daemonName x y z =
         whenM ((/=0) <$> Lua.pcall l x y z) luaError
-    where luaError = throw . LuaError daemonName =<< fmap T.decodeUtf8 (Lua.tostring l (-1))
+    where luaError = throw . LuaError =<< fmap T.decodeUtf8 (Lua.tostring l (-1))

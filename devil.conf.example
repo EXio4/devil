@@ -9,6 +9,9 @@ config:
 
 # list of daemons to enable
 enabled:
+   - name: test_daemon_2
+     config:
+       wakeup: 4
    - name: test_daemon
      config:
        wakeup: 10

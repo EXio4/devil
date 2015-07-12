@@ -9,12 +9,14 @@ config.get_text    = _internal_get_text
 
 throw_exception = _internal_throw_exception
 
+print = _internal_log_info
+
 function daemon.register(typ, options)
     if     typ == daemon.dummy     then
         _internal_register_daemon(typ)
     elseif typ == daemon.busy_wait then
-        if options.condition and options.action then
-            _internal_register_daemon(typ, options.condition, options.action)
+        if options and options.condition and options.action then
+            _internal_register_daemon(typ, options)
         else
             throw_exception("condition/action must be non nil")
         end
